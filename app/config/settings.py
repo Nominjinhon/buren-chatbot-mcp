@@ -20,6 +20,12 @@ class Settings(BaseSettings):
 
     mcp_server_path: str = ""
 
+    # Bearer token required on the /mcp HTTP endpoint (external MCP clients,
+    # e.g. ChatGPT connectors). Empty disables the endpoint entirely - it's
+    # a separate, publicly-reachable exposure of the same tools the agent
+    # already calls internally over stdio, so it must not be open by default.
+    mcp_http_token: str = ""
+
 
 @lru_cache
 def get_settings() -> Settings:
