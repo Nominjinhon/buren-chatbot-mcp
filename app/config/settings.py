@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+psycopg://buren:buren@localhost:5432/buren_chatbot"
 
     model_api_key: str = ""
-    model: str = "gemini-2.0-flash"
+    model: str = "gemini-3.6-flash"
 
     mcp_server_path: str = ""
 
