@@ -4,6 +4,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 
 import gradio as gr
 from fastapi import FastAPI
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -43,8 +44,17 @@ class _BearerAuth:
 # app/mcp_servers/server.py), additionally exposed over HTTP for external
 # MCP clients (e.g. a ChatGPT connector). Only built/mounted when a token is
 # configured - see app/config/settings.py's mcp_http_token docstring.
+#
+# streamable_http_app() defaults host="127.0.0.1", which auto-enables DNS
+# rebinding protection restricted to localhost - every real request through
+# Railway's public domain gets "Invalid Host header" rejected. This is a
+# public endpoint gated by _BearerAuth below, not a local dev server, so
+# disable it explicitly.
 mcp_http_app = (
-    mcp_server.streamable_http_app(streamable_http_path="/")
+    mcp_server.streamable_http_app(
+        streamable_http_path="/",
+        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    )
     if settings.mcp_http_token
     else None
 )
