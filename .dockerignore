@@ -8,7 +8,6 @@ __pycache__
 .env
 *.log
 tests
-README.md
 AGENTS.md
 CLAUDE.md
 .claude
