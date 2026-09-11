@@ -1,0 +1,160 @@
+"""Single MCP server exposing every read-only loan/analytics/customer tool
+for the chatbot agent.
+
+Originally split into three servers (loan data, financial analytics,
+customer profile), one process per domain; consolidated into one file per
+explicit user request. Every tool still delegates to its respective
+app.services module - this file never touches the ORM directly.
+
+DTI is computed entirely in app.services.analytics_service using plain
+arithmetic - never by an LLM. This server only fetches and returns the result.
+"""
+
+import uuid
+
+from mcp.server import MCPServer
+from mcp.server.mcpserver import UserMessage
+from mcp.server.mcpserver.exceptions import ToolError
+
+from app.database.models import LoanStatus, LoanType
+from app.database.session import AsyncSessionLocal
+from app.schemas.analytics import DTIResult
+from app.schemas.customer import CustomerProfile
+from app.schemas.loan import Loan
+from app.schemas.payment import OverduePayment
+from app.services import analytics_service, loan_service
+
+mcp = MCPServer("buren_server")
+
+
+def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise ToolError(f"Invalid {field_name}: {value!r} is not a valid UUID.") from exc
+
+
+@mcp.resource("resource://loan-types")
+def loan_types() -> list[str]:
+    """Static reference list of valid loan type values."""
+    return [loan_type.value for loan_type in LoanType]
+
+
+@mcp.resource("resource://loan-statuses")
+def loan_statuses() -> list[str]:
+    """Static reference list of valid loan status values.
+
+    These three are mutually exclusive on the `status` field itself - a loan
+    is exactly one of them. `get_active_loans` groups `active` and `overdue`
+    together for display (both are still open/owed), but that's a grouping
+    at the tool layer, not a change to the underlying status values here.
+    """
+    return [loan_status.value for loan_status in LoanStatus]
+
+
+@mcp.tool()
+async def get_active_loans(customer_id: str) -> list[Loan]:
+    """Return the customer's currently open loans (`active` or `overdue`
+    status) - excludes only `closed` loans."""
+    async with AsyncSessionLocal() as session:
+        return await loan_service.get_active_loans(
+            session, _parse_uuid(customer_id, "customer_id")
+        )
+
+
+@mcp.tool()
+async def get_loan_by_id(loan_id: str) -> Loan:
+    """Return a single loan's full detail by its id."""
+    async with AsyncSessionLocal() as session:
+        loan = await loan_service.get_loan_by_id(session, _parse_uuid(loan_id, "loan_id"))
+    if loan is None:
+        raise ToolError(f"No loan found with id {loan_id!r}.")
+    return loan
+
+
+@mcp.tool()
+async def get_overdue_payments(customer_id: str) -> list[OverduePayment]:
+    """Return the customer's currently-unpaid late payments."""
+    async with AsyncSessionLocal() as session:
+        return await loan_service.get_overdue_payments(
+            session, _parse_uuid(customer_id, "customer_id")
+        )
+
+
+@mcp.prompt()
+async def summarize_overdue(customer_id: str) -> UserMessage:
+    """Ask the model to summarize an already-fetched list of overdue
+    payments in plain language, without inventing or altering any of them."""
+    parsed_id = _parse_uuid(customer_id, "customer_id")
+    async with AsyncSessionLocal() as session:
+        payments = await loan_service.get_overdue_payments(session, parsed_id)
+
+    if not payments:
+        return UserMessage("This customer has no overdue payments. Say so plainly.")
+
+    lines = "\n".join(
+        f"- {payment.loan_type.value} loan, due {payment.due_date}, "
+        f"{payment.days_overdue} days overdue, amount {payment.amount}"
+        for payment in payments
+    )
+    return UserMessage(
+        "Using ONLY this already-fetched list of overdue payments - do not "
+        "invent or alter any of them - summarize them in plain language:\n"
+        f"{lines}"
+    )
+
+
+@mcp.tool()
+async def calculate_dti(customer_id: str) -> DTIResult:
+    """Compute the customer's debt-to-income ratio from active + overdue loans."""
+    parsed_id = _parse_uuid(customer_id, "customer_id")
+    async with AsyncSessionLocal() as session:
+        result = await analytics_service.calculate_dti(session, parsed_id)
+    if result is None:
+        raise ToolError(f"No customer found with id {customer_id!r}.")
+    return result
+
+
+@mcp.prompt()
+async def explain_dti(customer_id: str) -> UserMessage:
+    """Ask the model to narrate an already-computed DTI result in plain
+    language, without recomputing or altering any of the numbers."""
+    parsed_id = _parse_uuid(customer_id, "customer_id")
+    async with AsyncSessionLocal() as session:
+        result = await analytics_service.calculate_dti(session, parsed_id)
+    if result is None:
+        raise ValueError(f"No customer found with id {customer_id!r}.")
+    return UserMessage(
+        "Using ONLY these already-computed numbers - do not recompute or "
+        "alter them - explain this customer's debt-to-income ratio in plain "
+        "language:\n"
+        f"- Monthly income: {result.monthly_income}\n"
+        f"- Total monthly debt payments: {result.total_monthly_debt_payments}\n"
+        f"- DTI ratio: {result.dti_ratio}%"
+    )
+
+
+@mcp.tool()
+async def get_customer_income(customer_id: str) -> float:
+    """Return the customer's monthly income in MNT."""
+    parsed_id = _parse_uuid(customer_id, "customer_id")
+    async with AsyncSessionLocal() as session:
+        income = await analytics_service.get_customer_income(session, parsed_id)
+    if income is None:
+        raise ToolError(f"No customer found with id {customer_id!r}.")
+    return income
+
+
+@mcp.tool()
+async def get_customer_profile(customer_id: str) -> CustomerProfile:
+    """Return the customer's profile (name, monthly income, created_at)."""
+    parsed_id = _parse_uuid(customer_id, "customer_id")
+    async with AsyncSessionLocal() as session:
+        profile = await loan_service.get_customer_profile(session, parsed_id)
+    if profile is None:
+        raise ToolError(f"No customer found with id {customer_id!r}.")
+    return profile
+
+
+if __name__ == "__main__":
+    mcp.run(transport="stdio")
