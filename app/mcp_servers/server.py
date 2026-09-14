@@ -10,12 +10,15 @@ DTI is computed entirely in app.services.analytics_service using plain
 arithmetic - never by an LLM. This server only fetches and returns the result.
 """
 
+import logging
 import os
+import time
 import uuid
 
 from mcp.server import MCPServer
 from mcp.server.auth.provider import OAuthAuthorizationServerProvider
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
+from mcp.server.context import CallNext, HandlerResult, ServerRequestContext
 from mcp.server.mcpserver import UserMessage
 from mcp.server.mcpserver.exceptions import ToolError
 from starlette.requests import Request
@@ -29,6 +32,34 @@ from app.schemas.customer import CustomerProfile
 from app.schemas.loan import Loan
 from app.schemas.payment import OverduePayment
 from app.services import analytics_service, loan_service
+
+_call_logger = logging.getLogger("buren_server.calls")
+
+
+class _CallLoggingMiddleware:
+    """Logs every inbound MCP request - which tool (or other method) ran, and
+    how long it took.
+
+    The SDK itself only logs failures, and on the HTTP transport every call
+    looks like a generic `POST /mcp` from the outside (the tool name is
+    inside the JSON-RPC body, which Railway's HTTP request logs don't
+    parse) - this is the only way to see "what tool was called" in
+    Railway's Deploy log tab. Works identically over stdio, so it's just as
+    useful for local dev.
+    """
+
+    async def __call__(self, ctx: ServerRequestContext, call_next: CallNext) -> HandlerResult:
+        label = ctx.method
+        if ctx.method == "tools/call" and ctx.params:
+            label = f"tools/call {ctx.params.get('name')}(arguments={ctx.params.get('arguments')})"
+        started = time.monotonic()
+        try:
+            result = await call_next(ctx)
+        except Exception:
+            _call_logger.info("%s -> error (%.0fms)", label, (time.monotonic() - started) * 1000)
+            raise
+        _call_logger.info("%s -> ok (%.0fms)", label, (time.monotonic() - started) * 1000)
+        return result
 
 
 def _http_auth() -> tuple[OAuthAuthorizationServerProvider | None, AuthSettings | None]:
@@ -54,7 +85,12 @@ def _http_auth() -> tuple[OAuthAuthorizationServerProvider | None, AuthSettings 
 
 _auth_server_provider, _auth_settings = _http_auth()
 
-mcp = MCPServer("buren_server", auth_server_provider=_auth_server_provider, auth=_auth_settings)
+mcp = MCPServer(
+    "buren_server",
+    auth_server_provider=_auth_server_provider,
+    auth=_auth_settings,
+    middleware=[_CallLoggingMiddleware()],
+)
 
 
 @mcp.custom_route("/health", methods=["GET"])
