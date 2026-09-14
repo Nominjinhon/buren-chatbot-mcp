@@ -79,6 +79,14 @@ def _http_auth() -> tuple[OAuthAuthorizationServerProvider | None, AuthSettings 
         issuer_url=base_url,
         resource_server_url=f"{base_url}/mcp",
         client_registration_options=ClientRegistrationOptions(enabled=True),
+        # Silences a deprecation warning on newer mcp SDK versions than the one
+        # pinned locally (uv.lock) - the Railway image installs "mcp[cli]"
+        # unpinned. Harmlessly ignored as an unknown field on the older local
+        # SDK (pydantic's default extra="ignore"). True is correct here
+        # regardless of version: our SingleTokenOAuthProvider only ever issues
+        # tokens for this one resource, so refusing tokens issued for another
+        # resource costs nothing.
+        validate_token_resource=True,
     )
     return SingleTokenOAuthProvider(token), settings
 
