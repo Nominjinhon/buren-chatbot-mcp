@@ -157,6 +157,42 @@ docker compose up --build
 
 Контейнер эхлэхэд автоматаар: хостын Postgres-г хүлээх → `alembic upgrade head` → seed скрипт (хоосон бол л ажиллана) → FastAPI сервер асна.
 
+## Гадаад MCP клиентүүдэд зориулсан HTTP endpoint
+
+Дотоод (stdio) MCP серверээс гадна, яг ижил bodит tool-уудыг Railway дээр тусдаа сервис хэлбэрээр HTTP-ээр ил гаргасан байгаа - гадаад MCP клиент (жишээ нь Claude, ChatGPT connector) шууд дуудах боломжтой:
+
+-   **URL:** `https://mcp-min-test-production.up.railway.app/mcp` (streamable HTTP transport)
+-   **Health check** (нэвтрэлт шаардахгүй): `https://mcp-min-test-production.up.railway.app/health`
+-   **Нэвтрэлт:** `Authorization: Bearer <MCP_HTTP_TOKEN>` толгой заавал шаардлагатай (`/health`-с бусад бүх хүсэлтэд) - токенгүй эсвэл буруу бол `401` буцаана.
+-   **Tool/resource/prompt-ууд:** дотоод серверийн (`app/mcp_servers/server.py`) яг адилхан бүрэн жагсаалт - `get_active_loans`, `get_loan_by_id`, `get_overdue_payments`, `calculate_dti`, `get_customer_income`, `get_customer_profile` tool-ууд; `resource://loan-types`, `resource://loan-statuses` эх сурвалж; `summarize_overdue`, `explain_dti` prompt-ууд. Жинхэнэ (Neon) Postgres-тэй холбогддог тул хариу нь бодит өгөгдөл.
+
+> **Нэрийн тухай:** Railway дээрх сервисийн нэр нь `mcp-min-test` (анх Railway deploy/healthcheck-ийг оношлох зорилготой хамгийн бага хамааралтай туршилтын сервер байсан түүхийн улбаатай, `mcp_min/` фолдер), гэхдээ одоо `mcp_min/Dockerfile` нь бусад бодит tool-уудтай ижил `mcp_service/server.py`-г ашигладаг тул бүрэн бодит сервис.
+
+Жишээ (Python, `mcp` SDK-ийн streamable HTTP клиент ашиглан):
+
+```python
+import asyncio
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+URL = "https://mcp-min-test-production.up.railway.app/mcp"
+TOKEN = "<MCP_HTTP_TOKEN-ийн утга>"
+
+async def main() -> None:
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    async with httpx.AsyncClient(headers=headers, timeout=30) as http_client:
+        async with streamable_http_client(URL, http_client=http_client) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool(
+                    "calculate_dti", {"customer_id": "f430bc26-9001-5579-bc8e-7051ff612b88"}
+                )
+                print(result.content)
+
+asyncio.run(main())
+```
+
 ## API жишээ
 
 ### `GET /health`
