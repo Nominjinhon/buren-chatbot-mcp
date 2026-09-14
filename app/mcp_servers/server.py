@@ -10,21 +10,56 @@ DTI is computed entirely in app.services.analytics_service using plain
 arithmetic - never by an LLM. This server only fetches and returns the result.
 """
 
+import os
 import uuid
 
 from mcp.server import MCPServer
+from mcp.server.auth.provider import OAuthAuthorizationServerProvider
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions
 from mcp.server.mcpserver import UserMessage
 from mcp.server.mcpserver.exceptions import ToolError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from app.database.models import LoanStatus, LoanType
 from app.database.session import AsyncSessionLocal
+from app.mcp_servers.oauth_provider import SingleTokenOAuthProvider
 from app.schemas.analytics import DTIResult
 from app.schemas.customer import CustomerProfile
 from app.schemas.loan import Loan
 from app.schemas.payment import OverduePayment
 from app.services import analytics_service, loan_service
 
-mcp = MCPServer("buren_server")
+
+def _http_auth() -> tuple[OAuthAuthorizationServerProvider | None, AuthSettings | None]:
+    """OAuth wiring for the HTTP (Railway) deployment only - the stdio transport
+    (the agent, tests) never sets these env vars, so it always gets auth=None
+    here and is completely unaffected. `MCPServer` bakes auth in at
+    construction time (`streamable_http_app()` can't override it per-call),
+    so this has to run before `mcp = MCPServer(...)` below rather than in
+    mcp_service/server.py where the rest of the HTTP-only wiring lives.
+    """
+    domain = os.environ.get("RAILWAY_PUBLIC_DOMAIN")
+    token = os.environ.get("MCP_HTTP_TOKEN")
+    if not domain or not token:
+        return None, None
+    base_url = f"https://{domain}"
+    settings = AuthSettings(
+        issuer_url=base_url,
+        resource_server_url=f"{base_url}/mcp",
+        client_registration_options=ClientRegistrationOptions(enabled=True),
+    )
+    return SingleTokenOAuthProvider(token), settings
+
+
+_auth_server_provider, _auth_settings = _http_auth()
+
+mcp = MCPServer("buren_server", auth_server_provider=_auth_server_provider, auth=_auth_settings)
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def _health(_request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
 
 
 def _parse_uuid(value: str, field_name: str) -> uuid.UUID:
